@@ -4,6 +4,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.commons
+import qs.services
 import "../../../../helpers/fuzzysort.js" as Fuzzysort
 
 Singleton {
