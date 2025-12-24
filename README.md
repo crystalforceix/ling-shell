@@ -140,3 +140,7 @@ spawn-at-startup "/run/current-system/sw/bin/ling-shell"
 - QuickShell: [https://git.outfoxxed.me/outfoxxed/quickshell](https://git.outfoxxed.me/outfoxxed/quickshell)
 - niri: [https://github.com/YaLTeR/niri](https://github.com/YaLTeR/niri)
 - NixOS: [https://nixos.org](https://nixos.org)
+
+## 📄 License
+
+MIT License - see [LICENSE](./LICENSE) for details.
