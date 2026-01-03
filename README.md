@@ -1,21 +1,75 @@
 # Ling Shell
 
-**Ling Shell** là một shell UI viết bằng **QuickShell**, thiết kế để chạy trên Wayland compositor (như **niri**, **Hyprland**) và tích hợp tốt với **NixOS**.
+**Ling Shell** is a UI shell written in **QuickShell**, designed to run on Wayland compositors (like **niri**, **Hyprland**) and integrates well with **NixOS**.
 
 ---
 
 ## Installation
 
-### Nix (Flakes)
+### Manual Installation (Non-NixOS)
 
-#### 1. Thêm Ling Shell vào `flake.nix`
+> Suitable for other distros or for quick testing.
+
+#### Requirements
+
+- `A Wayland compositor`
+- `quickshell` (qs)
+- `Qt 6`
+- `git`
+
+#### Dependencies
+
+For manual installation, you will need to install the following dependencies yourself:
+
+**Runtime Dependencies:**
+
+- `brightnessctl`
+- `cava`
+- `cliphist`
+- `ddcutil`
+- `matugen`
+- `wlsunset`
+- `wl-clipboard`
+- `imagemagick`
+- `wget`
+
+**Fonts:**
+
+- [Material Symbols](https://fonts.google.com/icons)
+- [Rubik](https://fonts.google.com/specimen/Rubik)
+- [Nerd Fonts (Caskaydia Cove)](https://www.nerdfonts.com/font-downloads)
+
+#### Clone the repo
+
+```bash
+git clone https://github.com/imtraf02/ling-shell.git
+cd ling-shell
+```
+
+#### Run directly with QuickShell
+
+```bash
+qs -p .
+```
+
+> ⚠️ This method **does not install system-wide**, and is only for testing or development.
+
+---
+
+## Nix
+
+`ling-shell` is built with Nix and provides a flake with packages, modules, and a development shell.
+
+### Flake
+
+Add `ling-shell` to your `flake.nix` inputs:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
-    ling = {
+    ling-shell = {
       url = "github:imtraf02/ling-shell";
       inputs.nixpkgs.follows = "nixpkgs";
     };
@@ -23,123 +77,129 @@
 }
 ```
 
-#### 2. Cài package vào hệ thống (systemPackages)
+### Packages
+
+You can install the `ling-shell` package by adding it to your `systemPackages`.
+
+Example:
 
 ```nix
-inputs.ling.packages.${system}.default
+# flake.nix
+# ...
+outputs = { self, nixpkgs, ling-shell, ... }: {
+  nixosConfigurations.my-machine = nixpkgs.lib.nixosSystem {
+    # ...
+    modules = [
+      ({ pkgs, ... }: {
+        environment.systemPackages = [
+          ling-shell.packages.${pkgs.system}.default
+        ];
+      })
+    ];
+  };
+};
 ```
 
-Ví dụ:
+### NixOS Module
+
+The flake provides a NixOS module to enable `ling-shell` as a systemd service.
+
+**Usage:**
 
 ```nix
-environment.systemPackages = [
-  inputs.ling.packages.${system}.default
-];
+# flake.nix
+# ...
+outputs = { self, nixpkgs, ling-shell, ... }: {
+  nixosConfigurations.my-machine = nixpkgs.lib.nixosSystem {
+    # ...
+    modules = [
+      ling-shell.nixosModules.default
+      ({ pkgs, ... }: {
+        services.ling-shell.enable = true;
+      })
+    ];
+  };
+};
 ```
 
----
+**Options:**
 
-### Home Manager
+| Name      | Type    | Default                                | Description                                    |
+| --------- | ------- | -------------------------------------- | ---------------------------------------------- |
+| `enable`  | boolean | `false`                                | Enable Ling shell systemd service.             |
+| `package` | package | `ling-shell.packages.<system>.default` | The ling-shell package to use.                 |
+| `target`  | string  | `graphical-session.target`             | The systemd target for the ling-shell service. |
 
-Ling Shell cung cấp Home Manager module để bật và cấu hình shell.
+### Home Manager Module
+
+A Home Manager module is also provided for enabling and configuring the shell.
+
+**Usage:**
 
 ```nix
-{
-  inputs,
-  ...
-}: {
+# home.nix
+{ inputs, ... }: {
   imports = [
-    inputs.ling.homeModules.default
+    inputs.ling-shell.homeModules.default
   ];
 
   programs.ling-shell = {
     enable = true;
+    systemd.enable = true; # to run ling-shell as a systemd service
   };
 }
 ```
 
-Sau đó rebuild:
+Then rebuild your system:
 
 ```bash
 sudo nixos-rebuild switch --flake .#<hostname>
 ```
 
----
+**Options:**
 
-## Manual Installation (Non-Nix)
+| Name             | Type                    | Default                                | Description                                                                                   |
+| ---------------- | ----------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `enable`         | boolean                 | `false`                                | Enable Ling shell configuration.                                                              |
+| `systemd.enable` | boolean                 | `false`                                | Enable Ling shell systemd integration.                                                        |
+| `package`        | package                 | `ling-shell.packages.<system>.default` | The ling-shell package to use.                                                                |
+| `settings`       | attrset, string or path | `{}`                                   | Ling shell configuration settings, written to `~/.local/state/quickshell/ling/settings.json`. |
+| `config`         | attrset, string or path | `{}`                                   | Ling shell configuration, written to `~/.config/quickshell/ling/config.json`.                 |
+| `colours`        | attrset, string or path | `{}`                                   | Ling shell color configuration, written to `~/.local/state/quickshell/ling/colours.json`.     |
 
-> Phù hợp cho distro khác hoặc test nhanh.
+### Development Shell
 
-### Yêu cầu
-
-- Wayland compositor
-- `quickshell` (qs)
-- Qt 6
-- `git`
-
-### Clone repo
-
-```bash
-git clone https://github.com/imtraf02/ling-shell.git
-cd ling-shell
-```
-
-### Chạy trực tiếp bằng QuickShell
+To enter a development shell with all the necessary dependencies, run:
 
 ```bash
-qs -c .
+nix develop
 ```
-
-Hoặc nếu có entry riêng:
-
-```bash
-qs -c ling-shell
-```
-
-> ⚠️ Cách này **không cài system-wide**, chỉ dùng để test hoặc phát triển.
 
 ---
 
-## Usage
+## Autostart with a Wayland Compositor
 
-### Commands
+`ling-shell` can be started automatically when you log in to your Wayland compositor.
 
-- `ling-shell`
-  → Khởi động Ling Shell (khi cài bằng Nix)
+If you are using the NixOS or home-manager module with `systemd.enable = true;`, this should be handled automatically.
 
----
+If you are not using the systemd service, you can configure your compositor to launch `ling-shell` at startup.
 
-## Autostart với niri
+**Example for niri:**
 
-Ling Shell có thể được start tự động khi login vào **niri**.
-
-### Cấu hình
-
-Mở file:
-
-```text
-~/.config/niri/config.kdl
-```
-
-Thêm:
+Add the following to `~/.config/niri/config.kdl`:
 
 ```kdl
 spawn-at-startup "ling-shell"
-```
-
-Nếu cần chỉ rõ đường dẫn:
-
-```kdl
-spawn-at-startup "/run/current-system/sw/bin/ling-shell"
 ```
 
 ---
 
 ## Related Projects
 
-- QuickShell: [https://git.outfoxxed.me/outfoxxed/quickshell](https://git.outfoxxed.me/outfoxxed/quickshell)
-- niri: [https://github.com/YaLTeR/niri](https://github.com/YaLTeR/niri)
-- NixOS: [https://nixos.org](https://nixos.org)
+- [QuickShell](https://git.outfoxxed.me/outfoxxed/quickshell)
+- [niri](https://github.com/YaLTeR/niri)
+- [NixOS](https://nixos.org)
 
 ## 📄 License
 
