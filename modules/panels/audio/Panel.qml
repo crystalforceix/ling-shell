@@ -201,8 +201,10 @@ BarPanel {
               value: root.localInputVolume
               stepSize: 0.01
               heightRatio: 0.5
-              onMoved: value => root.ocalInputVolume = value
-              onPressedChanged: (pressed, value) => root.localInputVolumeChanging = pressed
+              onMoved: value => root.localInputVolume = value
+              onPressedChanged: (pressed, value) => {
+                root.localInputVolumeChanging = pressed;
+              }
               text: Math.round(root.localInputVolume * 100) + "%"
               Layout.bottomMargin: Config.appearance.spacing.small
             }
