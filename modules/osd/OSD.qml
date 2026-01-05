@@ -27,27 +27,18 @@ Variants {
     anchors.bottom: true
     color: "transparent"
 
-    // State management
     property string currentOSDType: ""
     readonly property var monitor: BrightnessService.getMonitorForScreen(screen) ?? null
-    property real volume: AudioService.volume ?? 0
-    property bool volumeChanging: false
-    property bool muted: AudioService.muted
-    property real inputVolume: AudioService.inputVolume ?? 0
-    property bool inputVolumeChanging: false
-    property bool inputMuted: AudioService.inputMuted
     property bool firstBrightnessReceived: false
-    property real brightness: monitor?.brightness ?? 0
 
-    // Consolidated value computation
     readonly property real currentValue: {
       switch (currentOSDType) {
       case "volume":
-        return volume;
+        return AudioService.volume ?? 0;
       case "input":
-        return inputVolume;
+        return AudioService.inputVolume ?? 0;
       case "brightness":
-        return brightness;
+        return monitor?.brightness ?? 0;
       default:
         return 0;
       }
@@ -56,9 +47,9 @@ Variants {
     readonly property bool currentMuted: {
       switch (currentOSDType) {
       case "volume":
-        return muted;
+        return AudioService.muted;
       case "input":
-        return inputMuted;
+        return AudioService.inputMuted;
       default:
         return false;
       }
@@ -71,7 +62,7 @@ Variants {
       case "input":
         return AudioService.getInputIcon();
       case "brightness":
-        return monitor ? Icons.getBrightnessIcon(monitor.brightness) : "brightness_5";
+        return monitor ? Icons.getBrightnessIcon(panel.currentValue) : "brightness_5";
       default:
         return "";
       }
@@ -85,14 +76,27 @@ Variants {
       hideTimer.restart();
     }
 
+    function _updateValue(value) {
+      switch (currentOSDType) {
+      case "volume":
+        AudioService.setVolume(value);
+        break;
+      case "input":
+        AudioService.setInputVolume(value);
+        break;
+      case "brightness":
+        if (monitor?.brightnessControlAvailable) {
+          monitor.setBrightness(value);
+        }
+        break;
+      }
+    }
+
     Connections {
       target: AudioService
 
       function onVolumeChanged() {
         panel.showOSD("volume");
-        if (!panel.volumeChanging) {
-          panel.volume = AudioService.volume;
-        }
       }
 
       function onMutedChanged() {
@@ -101,9 +105,6 @@ Variants {
 
       function onInputVolumeChanged() {
         panel.showOSD("input");
-        if (!panel.inputVolumeChanging) {
-          panel.inputVolume = AudioService.inputVolume;
-        }
       }
 
       function onInputMutedChanged() {
@@ -130,7 +131,6 @@ Variants {
       onTriggered: {
         osdItem.opacity = 0;
         osdItem.scale = 0.85;
-        Qt.callLater(() => popup.visible = false);
       }
     }
 
@@ -152,7 +152,13 @@ Variants {
         scale: 0.85
 
         Behavior on opacity {
-          IAnim {}
+          IAnim {
+            onRunningChanged: {
+              if (!running && osdItem.opacity === 0) {
+                popup.visible = false;
+              }
+            }
+          }
         }
         Behavior on scale {
           IAnim {
@@ -232,37 +238,14 @@ Variants {
             to: (panel.currentOSDType === "volume" || panel.currentOSDType === "input") && Settings.audio.volumeOverdrive ? 1.5 : 1.0
             value: panel.currentValue
 
-            onMoved: v => {
-              switch (panel.currentOSDType) {
-              case "volume":
-                panel.volume = v;
-                AudioService.setVolume(v);
-                break;
-              case "input":
-                panel.inputVolume = v;
-                AudioService.setInputVolume(v);
-                break;
-              case "brightness":
-                if (panel.monitor?.brightnessControlAvailable) {
-                  panel.monitor.setBrightness(v);
-                }
-                break;
-              }
-            }
+            onMoved: v => _updateValue(v)
 
             onPressedChanged: (pressed, v) => {
-              pressed ? hideTimer.stop() : hideTimer.restart();
-
-              if (panel.currentOSDType === "volume") {
-                panel.volumeChanging = pressed;
-                if (!pressed)
-                  AudioService.setVolume(v);
-              } else if (panel.currentOSDType === "input") {
-                panel.inputVolumeChanging = pressed;
-                if (!pressed)
-                  AudioService.setInputVolume(v);
-              } else if (panel.monitor?.brightnessControlAvailable) {
-                panel.monitor.setBrightness(v);
+              if (pressed) {
+                hideTimer.stop();
+              } else {
+                hideTimer.restart();
+                _updateValue(v);
               }
             }
           }
