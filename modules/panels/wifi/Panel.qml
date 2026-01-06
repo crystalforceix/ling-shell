@@ -2,6 +2,8 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls
+import Quickshell
 import qs.config
 import qs.commons
 import qs.widgets
@@ -11,15 +13,93 @@ import ".."
 BarPanel {
   id: root
 
-  onOpened: NetworkService.scan()
+  property string panelViewMode: "wifi"
+
+  property bool ethernetInfoExpanded: false
+  property bool ethernetDetailsGrid: true
+
+  property string passwordSsid: ""
+  property string expandedSsid: ""
+  property bool hasHadNetworks: false
+
+  property string editingDnsIface: ""
+  property string dnsInput: ""
+
+  onPanelViewModeChanged: {
+    // Reset transient states to avoid layout artifacts
+    passwordSsid = "";
+    expandedSsid = "";
+    if (panelViewMode === "wifi") {
+      ethernetInfoExpanded = false;
+      // Trigger scan if needed
+      if (Settings.network.wifiEnabled && !NetworkService.scanning && Object.keys(NetworkService.networks).length === 0)
+        NetworkService.scan();
+    } else {
+      if (NetworkService.ethernetConnected) {
+        NetworkService.refreshActiveEthernetDetails();
+      } else {
+        NetworkService.refreshEthernet();
+      }
+    }
+  }
+
+  onOpened: {
+    hasHadNetworks = false;
+    NetworkService.scan();
+    // Preload active Wi‑Fi details so Info shows instantly
+    NetworkService.refreshActiveWifiDetails();
+    // Also fetch Ethernet details if connected
+    NetworkService.refreshActiveEthernetDetails();
+
+    // Restore last view logic (based on availability)
+    if (!Settings.network.wifiEnabled && NetworkService.hasEthernet())
+      panelViewMode = "ethernet";
+    else
+      panelViewMode = "wifi";
+  }
+
+  readonly property var knownNetworks: {
+    if (!Settings.network.wifiEnabled)
+      return [];
+
+    let nets = Object.values(NetworkService.networks);
+    let known = nets.filter(n => n.connected || n.existing || n.cached);
+
+    // Sort: connected first, then by signal strength
+    known.sort((a, b) => {
+      if (a.connected !== b.connected)
+        return b.connected - a.connected;
+      return b.signal - a.signal;
+    });
+
+    return known;
+  }
+
+  readonly property var availableNetworks: {
+    if (!Settings.network.wifiEnabled)
+      return [];
+
+    let nets = Object.values(NetworkService.networks);
+    let available = nets.filter(n => !n.connected && !n.existing && !n.cached);
+
+    // Sort by signal strength
+    available.sort((a, b) => b.signal - a.signal);
+
+    return available;
+  }
+
+  onKnownNetworksChanged: {
+    if (knownNetworks.length > 0)
+      hasHadNetworks = true;
+  }
+
+  onAvailableNetworksChanged: {
+    if (availableNetworks.length > 0)
+      hasHadNetworks = true;
+  }
 
   contentComponent: Item {
     id: content
-
-    property string passwordSsid: ""
-    property string passwordInput: ""
-    property string expandedSsid: ""
-
     implicitWidth: Config.bar.sizes.networkWidth
     implicitHeight: mainColumn.implicitHeight + (root.padding * 2)
 
@@ -38,34 +118,54 @@ BarPanel {
           id: headerRow
           anchors.fill: parent
           anchors.margins: root.padding
-          spacing: spacing
+          spacing: root.spacing
 
           IIcon {
-            icon: Settings.network.wifiEnabled ? "wifi" : "wifi_off"
+            id: modeIcon
+            icon: panelViewMode === "wifi" ? (Settings.network.wifiEnabled ? "wifi" : "wifi_off") : (NetworkService.hasEthernet() ? (NetworkService.ethernetConnected ? "ethernet" : "ethernet") : "ethernet_off")
             pointSize: Config.appearance.font.size.large
-            color: ThemeService.palette.mPrimary
+            color: panelViewMode === "wifi" ? (Settings.network.wifiEnabled ? ThemeService.palette.mPrimary : ThemeService.palette.mOnSurfaceVariant) : (NetworkService.ethernetConnected ? ThemeService.palette.mPrimary : ThemeService.palette.mOnSurfaceVariant)
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              onClicked: {
+                if (panelViewMode === "wifi") {
+                  if (NetworkService.hasEthernet()) {
+                    panelViewMode = "ethernet";
+                  }
+                } else {
+                  panelViewMode = "wifi";
+                }
+              }
+            }
           }
 
           IText {
-            text: "Wi-Fi"
+            text: panelViewMode === "wifi" ? "Wi-Fi" : "Ethernet"
             pointSize: Config.appearance.font.size.larger
+            font.weight: Font.DemiBold
             color: ThemeService.palette.mOnSurface
             Layout.fillWidth: true
           }
 
           ISwitch {
             id: wifiSwitch
+            visible: panelViewMode === "wifi"
             checked: Settings.network.wifiEnabled
-            onToggled: {
-              NetworkService.setWifiEnabled(!Settings.network.wifiEnabled);
-            }
+            onToggled: NetworkService.setWifiEnabled(checked)
           }
 
           IIconButton {
             icon: "refresh"
             size: Config.appearance.widget.size * 0.8
-            enabled: Settings.network.wifiEnabled && !NetworkService.scanning
-            onClicked: NetworkService.scan()
+            enabled: panelViewMode === "wifi" ? (Settings.network.wifiEnabled && !NetworkService.scanning) : true
+            onClicked: {
+              if (panelViewMode === "wifi")
+                NetworkService.scan();
+              else
+                NetworkService.refreshEthernet();
+            }
           }
 
           IIconButton {
@@ -76,498 +176,684 @@ BarPanel {
         }
       }
 
-      Rectangle {
-        id: errorRect
-        visible: NetworkService.lastError.length > 0
+      // Unified scrollable content (Wi‑Fi or Ethernet view)
+      ColumnLayout {
+        id: wifiSectionContainer
+        visible: true
         Layout.fillWidth: true
-        implicitHeight: visible ? errorRow.implicitHeight + root.padding * 2 : 0
-        color: Qt.alpha(ThemeService.palette.mError, 0.1)
-        radius: Settings.appearance.cornerRadius
-        border.width: 2
-        border.color: ThemeService.palette.mError
+        spacing: root.spacing
 
-        RowLayout {
-          id: errorRow
-          anchors.fill: parent
-          anchors.margins: root.padding
-          spacing: spacing
+        // Mode switch
+        ITabBar {
+          id: modeTabBar
+          Layout.fillWidth: true
+          currentIndex: root.panelViewMode === "wifi" ? 0 : 1
 
-          IIcon {
-            icon: "warning"
-            pointSize: Config.appearance.font.size.large
-            color: ThemeService.palette.mError
-          }
-
-          IText {
-            text: NetworkService.lastError
-            color: ThemeService.palette.mError
-            pointSize: Config.appearance.font.size.small
-            wrapMode: Text.Wrap
-            Layout.fillWidth: true
-          }
-
-          IIconButton {
-            icon: "close"
-            size: Config.appearance.widget.size * 0.6
-            onClicked: NetworkService.lastError = ""
-          }
-        }
-      }
-
-      IBox {
-        id: list
-        Layout.fillWidth: true
-
-        implicitHeight: {
-          if (!Settings.network.wifiEnabled)
-            return wifiDisabled.implicitHeight + (root.padding * 2);
-          if (Settings.network.wifiEnabled && NetworkService.scanning && Object.keys(NetworkService.networks).length === 0)
-            return wifiScanning.implicitHeight + (root.padding * 2);
-          if (Settings.network.wifiEnabled && !NetworkService.scanning && Object.keys(NetworkService.networks).length === 0)
-            return emptyState.implicitHeight + (root.padding * 2);
-
-          return Math.min(networksFlickable.contentHeight + (root.padding * 2), 380);
+          content: [
+            ITabButton {
+              text: "Wi-Fi"
+              tabIndex: 0
+              checked: modeTabBar.currentIndex === 0
+              onClicked: root.panelViewMode = "wifi"
+            },
+            ITabButton {
+              // Dim when no Ethernet devices are detected
+              opacity: NetworkService.hasEthernet() ? 1.0 : 0.5
+              text: "Ethernet"
+              tabIndex: 1
+              checked: modeTabBar.currentIndex === 1
+              onClicked: {
+                if (NetworkService.hasEthernet()) {
+                  root.panelViewMode = "ethernet";
+                } else {
+                  // Revert if no ethernet
+                  modeTabBar.currentIndex = 0;
+                }
+              }
+            }
+          ]
         }
 
-        ColumnLayout {
-          id: wifiDisabled
-          visible: !Settings.network.wifiEnabled
-          anchors.fill: parent
-          anchors.margins: root.padding
+        // Error message
+        Rectangle {
+          visible: panelViewMode === "wifi" && NetworkService.lastError.length > 0
+          Layout.fillWidth: true
+          implicitHeight: errorRow.implicitHeight + (root.padding * 2)
+          color: Qt.alpha(ThemeService.palette.mError, 0.1)
+          radius: Settings.appearance.cornerRadius
+          border.width: 2
+          border.color: ThemeService.palette.mError
 
-          Item {
-            Layout.fillHeight: true
-          }
+          RowLayout {
+            id: errorRow
+            anchors.fill: parent
+            anchors.margins: root.padding
+            spacing: root.spacing
 
-          IIcon {
-            icon: "wifi_off"
-            pointSize: Config.appearance.widget.size
-            color: ThemeService.palette.mOnSurfaceVariant
-            Layout.alignment: Qt.AlignHCenter
-          }
+            IIcon {
+              icon: "warning"
+              pointSize: Config.appearance.font.size.large
+              color: ThemeService.palette.mError
+            }
 
-          IText {
-            text: "Wi-Fi is disabled"
-            pointSize: Config.appearance.font.size.large
-            color: ThemeService.palette.mOnSurfaceVariant
-            Layout.alignment: Qt.AlignHCenter
-          }
+            IText {
+              text: NetworkService.lastError
+              color: ThemeService.palette.mError
+              pointSize: Config.appearance.font.size.small
+              wrapMode: Text.Wrap
+              Layout.fillWidth: true
+            }
 
-          IText {
-            text: "Enable Wi-Fi to connect to networks"
-            pointSize: Config.appearance.font.size.small
-            color: ThemeService.palette.mOnSurfaceVariant
-            Layout.alignment: Qt.AlignHCenter
-          }
-
-          Item {
-            Layout.fillHeight: true
+            IIconButton {
+              icon: "close"
+              size: Config.appearance.widget.size * 0.6
+              onClicked: NetworkService.lastError = ""
+            }
           }
         }
 
-        ColumnLayout {
-          id: wifiScanning
-          visible: Settings.network.wifiEnabled && NetworkService.scanning && Object.keys(NetworkService.networks).length === 0
-          anchors.fill: parent
-          anchors.margins: root.padding
-          spacing: spacing
-
-          Item {
-            Layout.fillHeight: true
-          }
-
-          IBusyIndicator {
-            running: true
-            color: ThemeService.palette.mPrimary
-            size: Config.appearance.widget.size
-            Layout.alignment: Qt.AlignHCenter
-          }
-
-          IText {
-            text: "Searching for nearby networks..."
-            pointSize: Config.appearance.font.size.small
-            color: ThemeService.palette.mOnSurfaceVariant
-            Layout.alignment: Qt.AlignHCenter
-          }
-
-          Item {
-            Layout.fillHeight: true
-          }
-        }
-
+        // Unified scrollable content
         IFlickable {
-          id: networksFlickable
-          visible: Settings.network.wifiEnabled && (!NetworkService.scanning || Object.keys(NetworkService.networks).length > 0)
-          anchors.fill: parent
-          anchors.margins: root.padding
+          id: contentScroll
+          Layout.fillWidth: true
+          Layout.preferredHeight: Math.min(contentColumn.implicitHeight, 380)
+          Layout.fillHeight: false
           clip: true
           contentWidth: parent.width
-          contentHeight: listContainer.implicitHeight
-          boundsBehavior: Flickable.StopAtBounds
+          contentHeight: contentColumn.implicitHeight
 
           ColumnLayout {
-            id: listContainer
-            width: networksFlickable.width
-            spacing: root.padding
+            id: contentColumn
+            width: contentScroll.width
+            spacing: root.spacing
 
-            Repeater {
-              model: {
-                if (!Settings.network.wifiEnabled)
-                  return [];
-                const nets = Object.values(NetworkService.networks);
-                return nets.sort((a, b) => {
-                  if (a.connected !== b.connected)
-                    return b.connected - a.connected;
-                  return b.signal - a.signal;
-                });
-              }
+            // Wi‑Fi disabled state
+            IBox {
+              id: disabledBox
+              visible: panelViewMode === "wifi" && !Settings.network.wifiEnabled
+              Layout.fillWidth: true
+              implicitHeight: disabledColumn.implicitHeight + root.padding * 2
 
-              Rectangle {
-                id: wifiItem
-                required property var modelData
+              ColumnLayout {
+                id: disabledColumn
+                anchors.fill: parent
+                anchors.margins: root.padding
 
-                Layout.fillWidth: true
-                Layout.preferredHeight: netColumn.implicitHeight + (root.padding * 2)
-                radius: Settings.appearance.cornerRadius
-                opacity: (NetworkService.disconnectingFrom === modelData.ssid || NetworkService.forgettingNetwork === modelData.ssid) ? 0.6 : 1.0
-                color: modelData.connected ? Qt.rgba(ThemeService.palette.mPrimary.r, ThemeService.palette.mPrimary.g, ThemeService.palette.mPrimary.b, 0.05) : ThemeService.palette.mSurface
-                border.width: 2
-                border.color: modelData.connected ? ThemeService.palette.mPrimary : Qt.alpha(ThemeService.palette.mOutline, 0.4)
-
-                Behavior on opacity {
-                  IAnim {}
+                Item {
+                  Layout.fillHeight: true
                 }
 
+                IIcon {
+                  icon: "wifi_off"
+                  pointSize: 48
+                  color: ThemeService.palette.mOnSurfaceVariant
+                  Layout.alignment: Qt.AlignHCenter
+                }
+
+                IText {
+                  text: "Wi-Fi is disabled"
+                  pointSize: Config.appearance.font.size.large
+                  color: ThemeService.palette.mOnSurfaceVariant
+                  Layout.alignment: Qt.AlignHCenter
+                }
+
+                IText {
+                  text: "Enable Wi-Fi to connect to networks"
+                  pointSize: Config.appearance.font.size.small
+                  color: ThemeService.palette.mOnSurfaceVariant
+                  horizontalAlignment: Text.AlignHCenter
+                  Layout.fillWidth: true
+                  wrapMode: Text.WordWrap
+                }
+
+                Item {
+                  Layout.fillHeight: true
+                }
+              }
+            }
+
+            // Scanning state
+            IBox {
+              id: scanningBox
+              visible: panelViewMode === "wifi" && Settings.network.wifiEnabled && Object.keys(NetworkService.networks).length === 0 && !root.hasHadNetworks
+              Layout.fillWidth: true
+              implicitHeight: scanningColumn.implicitHeight + root.padding * 2
+
+              ColumnLayout {
+                id: scanningColumn
+                anchors.fill: parent
+                anchors.margins: root.padding
+                spacing: root.spacing * 2
+
+                Item {
+                  Layout.fillHeight: true
+                }
+
+                IBusyIndicator {
+                  running: true
+                  color: ThemeService.palette.mPrimary
+                  size: Config.appearance.widget.size
+                  Layout.alignment: Qt.AlignHCenter
+                }
+
+                IText {
+                  text: "Searching for nearby networks..."
+                  pointSize: Config.appearance.font.size.normal
+                  color: ThemeService.palette.mOnSurfaceVariant
+                  Layout.alignment: Qt.AlignHCenter
+                }
+
+                Item {
+                  Layout.fillHeight: true
+                }
+              }
+            }
+
+            // Empty state
+            IBox {
+              id: emptyBox
+              visible: panelViewMode === "wifi" && Settings.network.wifiEnabled && !NetworkService.scanning && Object.keys(NetworkService.networks).length === 0 && root.hasHadNetworks
+              Layout.fillWidth: true
+              implicitHeight: emptyColumn.implicitHeight + root.padding * 2
+
+              ColumnLayout {
+                id: emptyColumn
+                anchors.fill: parent
+                anchors.margins: root.padding
+                spacing: root.spacing * 2
+
+                Item {
+                  Layout.fillHeight: true
+                }
+
+                IIcon {
+                  icon: "search"
+                  pointSize: 64
+                  color: ThemeService.palette.mOnSurfaceVariant
+                  Layout.alignment: Qt.AlignHCenter
+                }
+
+                IText {
+                  text: "No networks found"
+                  pointSize: Config.appearance.font.size.large
+                  color: ThemeService.palette.mOnSurfaceVariant
+                  Layout.alignment: Qt.AlignHCenter
+                }
+
+                IButton {
+                  text: "Scan again"
+                  icon: "refresh"
+                  Layout.alignment: Qt.AlignHCenter
+                  onClicked: NetworkService.scan()
+                }
+
+                Item {
+                  Layout.fillHeight: true
+                }
+              }
+            }
+
+            // Networks list container (Wi‑Fi)
+            ColumnLayout {
+              id: networksList
+              visible: panelViewMode === "wifi" && Settings.network.wifiEnabled && Object.keys(NetworkService.networks).length > 0
+              width: parent.width
+              spacing: root.spacing
+
+              WiFiNetworksList {
+                label: "Known Networks"
+                model: root.knownNetworks
+                passwordSsid: root.passwordSsid
+                expandedSsid: root.expandedSsid
+                onDnsEditRequested: (iface, currentDns) => {
+                  root.dnsInput = currentDns;
+                  root.editingDnsIface = iface;
+                }
+                onDnsEditCancelled: {
+                  root.editingDnsIface = "";
+                  root.dnsInput = "";
+                }
+                onDnsEditSaved: (iface, dns) => {
+                  NetworkService.setDns(iface, dns);
+                  root.editingDnsIface = "";
+                  root.dnsInput = "";
+                }
+                editingDnsIface: root.editingDnsIface
+                dnsInput: root.dnsInput
+              }
+
+              WiFiNetworksList {
+                label: "Available Networks"
+                model: root.availableNetworks
+                passwordSsid: root.passwordSsid
+                expandedSsid: root.expandedSsid
+                onPasswordRequested: ssid => {
+                  root.passwordSsid = ssid;
+                  root.expandedSsid = "";
+                }
+                onPasswordSubmitted: (ssid, password) => {
+                  NetworkService.connect(ssid, password);
+                  root.passwordSsid = "";
+                }
+                onPasswordCancelled: root.passwordSsid = ""
+                onDnsEditRequested: (iface, currentDns) => {
+                  root.dnsInput = currentDns;
+                  root.editingDnsIface = iface;
+                }
+                onDnsEditCancelled: {
+                  root.editingDnsIface = "";
+                  root.dnsInput = "";
+                }
+                onDnsEditSaved: (iface, dns) => {
+                  NetworkService.setDns(iface, dns);
+                  root.editingDnsIface = "";
+                  root.dnsInput = "";
+                }
+                editingDnsIface: root.editingDnsIface
+                dnsInput: root.dnsInput
+              }
+            }
+
+            // Ethernet view
+            ColumnLayout {
+              id: ethernetSection
+              visible: panelViewMode === "ethernet"
+              width: parent.width
+              spacing: root.spacing
+
+              IText {
+                text: "Available Interfaces"
+                pointSize: Config.appearance.font.size.normal
+                color: ThemeService.palette.mOnSurface
+              }
+
+              // Empty state when no Ethernet devices
+              IBox {
+                visible: !(NetworkService.ethernetInterfaces && NetworkService.ethernetInterfaces.length > 0)
+                Layout.fillWidth: true
+                implicitHeight: emptyEthColumn.implicitHeight + root.padding * 2
+
                 ColumnLayout {
-                  id: netColumn
-                  width: parent.width - (root.padding * 2)
-                  x: root.padding
-                  y: root.padding
-                  spacing: spacing
+                  id: emptyEthColumn
+                  anchors.fill: parent
+                  anchors.margins: root.padding
+                  spacing: root.padding
 
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: spacing
-
-                    IIcon {
-                      icon: NetworkService.signalIcon(wifiItem.modelData.signal, wifiItem.modelData.connected)
-                      pointSize: Config.appearance.font.size.large
-                      color: wifiItem.modelData.connected ? ThemeService.palette.mPrimary : ThemeService.palette.mOnSurface
-                    }
-
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 2
-
-                      IText {
-                        text: wifiItem.modelData.ssid
-                        pointSize: Config.appearance.font.size.small
-                        font.weight: wifiItem.modelData.connected ? Font.DemiBold : Font.Medium
-                        color: ThemeService.palette.mOnSurface
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                      }
-
-                      RowLayout {
-                        spacing: spacing
-
-                        IText {
-                          text: "Signal: " + wifiItem.modelData.signal + "%"
-                          pointSize: Config.appearance.font.size.small
-                          color: ThemeService.palette.mOnSurfaceVariant
-                        }
-                        IText {
-                          text: "•"
-                          pointSize: Config.appearance.font.size.small
-                          color: ThemeService.palette.mOnSurfaceVariant
-                        }
-                        IText {
-                          text: NetworkService.isSecured(wifiItem.modelData.security) ? wifiItem.modelData.security : "Open"
-                          pointSize: Config.appearance.font.size.small
-                          color: ThemeService.palette.mOnSurfaceVariant
-                        }
-
-                        Rectangle {
-                          visible: wifiItem.modelData.connected && NetworkService.disconnectingFrom !== wifiItem.modelData.ssid
-                          color: ThemeService.palette.mPrimary
-                          radius: height * 0.5
-                          Layout.preferredWidth: connectedText.implicitWidth + (root.spacing * 2)
-                          Layout.preferredHeight: connectedText.implicitHeight + root.spacing
-
-                          IText {
-                            id: connectedText
-                            anchors.centerIn: parent
-                            text: "Connected"
-                            pointSize: Config.appearance.font.size.small
-                            color: ThemeService.palette.mOnPrimary
-                          }
-                        }
-
-                        Rectangle {
-                          visible: NetworkService.disconnectingFrom === wifiItem.modelData.ssid
-                          color: ThemeService.palette.mError
-                          radius: height * 0.5
-                          Layout.preferredWidth: disconnectingText.implicitWidth + (root.spacing * 2)
-                          Layout.preferredHeight: disconnectingText.implicitHeight + root.spacing
-
-                          IText {
-                            id: disconnectingText
-                            anchors.centerIn: parent
-                            text: "Disconnecting..."
-                            pointSize: Config.appearance.font.size.small
-                            color: ThemeService.palette.mOnPrimary
-                          }
-                        }
-
-                        Rectangle {
-                          visible: NetworkService.forgettingNetwork === wifiItem.modelData.ssid
-                          color: ThemeService.palette.mError
-                          radius: height * 0.5
-                          Layout.preferredWidth: forgettingText.implicitWidth + (root.spacing * 2)
-                          Layout.preferredHeight: forgettingText.implicitHeight + root.spacing
-
-                          IText {
-                            id: forgettingText
-                            anchors.centerIn: parent
-                            text: "Forgetting..."
-                            pointSize: Config.appearance.font.size.small
-                            color: ThemeService.palette.mOnPrimary
-                          }
-                        }
-
-                        Rectangle {
-                          visible: wifiItem.modelData.cached && !wifiItem.modelData.connected && NetworkService.forgettingNetwork !== wifiItem.modelData.ssid && NetworkService.disconnectingFrom !== wifiItem.modelData.ssid
-                          color: "transparent"
-                          border.color: Qt.alpha(ThemeService.palette.mOutline, 0.4)
-                          border.width: 2
-                          radius: height * 0.5
-                          Layout.preferredWidth: savedText.implicitWidth + (root.spacing * 2)
-                          Layout.preferredHeight: savedText.implicitHeight + root.spacing
-
-                          IText {
-                            id: savedText
-                            anchors.centerIn: parent
-                            text: "Saved"
-                            pointSize: Config.appearance.font.size.small
-                            color: ThemeService.palette.mOnSurfaceVariant
-                          }
-                        }
-                      }
-                    }
-
-                    RowLayout {
-                      spacing: root.spacing
-
-                      IBusyIndicator {
-                        visible: NetworkService.connectingTo === wifiItem.modelData.ssid || NetworkService.disconnectingFrom === wifiItem.modelData.ssid || NetworkService.forgettingNetwork === wifiItem.modelData.ssid
-                        running: visible
-                        size: Config.appearance.widget.size * 0.5
-                        color: ThemeService.palette.mPrimary
-                      }
-
-                      IIconButton {
-                        visible: (wifiItem.modelData.existing || wifiItem.modelData.cached) && !wifiItem.modelData.connected
-                        icon: "delete"
-                        size: Config.appearance.widget.size * 0.8
-                        onClicked: content.expandedSsid = content.expandedSsid === wifiItem.modelData.ssid ? "" : wifiItem.modelData.ssid
-                      }
-
-                      IButton {
-                        visible: !wifiItem.modelData.connected
-                        text: "Connect"
-                        outlined: true
-                        fontSize: Config.appearance.font.size.small
-                        enabled: !NetworkService.connecting
-                        onClicked: {
-                          if (wifiItem.modelData.existing || wifiItem.modelData.cached || !NetworkService.isSecured(wifiItem.modelData.security)) {
-                            NetworkService.connect(wifiItem.modelData.ssid);
-                          } else {
-                            content.passwordSsid = wifiItem.modelData.ssid;
-                            content.passwordInput = "";
-                            content.expandedSsid = "";
-                          }
-                        }
-                      }
-
-                      IButton {
-                        visible: wifiItem.modelData.connected
-                        text: "Disconnect"
-                        outlined: true
-                        backgroundColor: ThemeService.palette.mError
-                        hoverColor: ThemeService.palette.mError
-                        fontSize: Config.appearance.font.size.small
-                        onClicked: NetworkService.disconnect(wifiItem.modelData.ssid)
-                      }
-                    }
+                  IIcon {
+                    icon: "ethernet_off"
+                    pointSize: 40
+                    color: ThemeService.palette.mOnSurfaceVariant
+                    Layout.alignment: Qt.AlignHCenter
                   }
 
-                  Rectangle {
-                    visible: content.passwordSsid === wifiItem.modelData.ssid
+                  IText {
+                    text: "No Ethernet devices detected"
+                    pointSize: Config.appearance.font.size.small
+                    color: ThemeService.palette.mOnSurfaceVariant
+                    horizontalAlignment: Text.AlignHCenter
                     Layout.fillWidth: true
-                    Layout.preferredHeight: passwordRow.implicitHeight + (root.padding * 2)
-                    color: ThemeService.palette.mSurfaceVariant
-                    border.color: Qt.alpha(ThemeService.palette.mOutline, 0.4)
-                    border.width: 2
+                    wrapMode: Text.WordWrap
+                  }
+                }
+              }
+
+              // Interfaces list
+              ColumnLayout {
+                id: ethIfacesList
+                visible: NetworkService.ethernetInterfaces && NetworkService.ethernetInterfaces.length > 0
+                width: parent.width
+                spacing: Config.appearance.spacing.small
+
+                Repeater {
+                  model: NetworkService.ethernetInterfaces || []
+                  delegate: IBox {
+                    id: ethItem
+
+                    Layout.fillWidth: true
+                    // Layout.leftMargin: Config.appearance.spacing.small
+                    // Layout.rightMargin: Config.appearance.spacing.small
+                    implicitHeight: ethItemColumn.implicitHeight + (root.padding * 2)
                     radius: Settings.appearance.cornerRadius
+                    border.width: 1 // Style.borderS
+                    border.color: modelData.connected ? ThemeService.palette.mPrimary : ThemeService.palette.mOutline
+                    color: modelData.connected ? Qt.rgba(ThemeService.palette.mPrimary.r, ThemeService.palette.mPrimary.g, ThemeService.palette.mPrimary.b, 0.05) : ThemeService.palette.mSurface
 
-                    RowLayout {
-                      id: passwordRow
-                      anchors.fill: parent
-                      anchors.margins: root.padding
-                      spacing: spacing
+                    ColumnLayout {
+                      id: ethItemColumn
+                      width: parent.width - (root.padding * 2)
+                      x: root.padding
+                      y: root.padding
+                      spacing: root.spacing
 
-                      Rectangle {
+                      // Main row
+                      RowLayout {
+                        id: ethHeaderRow
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        radius: Settings.appearance.cornerRadius
-                        color: ThemeService.palette.mSurface
-                        border.color: pwdInput.activeFocus ? ThemeService.palette.mSecondary : ThemeService.palette.mOutline
-                        border.width: 2
+                        spacing: root.spacing
 
-                        TextInput {
-                          id: pwdInput
+                        IIcon {
+                          icon: "ethernet"
+                          pointSize: Config.appearance.font.size.large
+                          color: modelData.connected ? ThemeService.palette.mPrimary : ThemeService.palette.mOnSurface
+                        }
+
+                        ColumnLayout {
+                          Layout.fillWidth: true
+                          spacing: 2
+
+                          IText {
+                            text: modelData.ifname
+                            pointSize: Config.appearance.font.size.normal
+                            font.weight: modelData.connected ? Font.DemiBold : Font.Medium
+                            color: ThemeService.palette.mOnSurface
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                          }
+
+                          RowLayout {
+                            spacing: Config.appearance.spacing.small
+
+                            // Connected badge
+                            Rectangle {
+                              visible: modelData.connected
+                              color: ThemeService.palette.mPrimary
+                              radius: height * 0.5
+                              width: ethConnectedText.implicitWidth + (Config.appearance.spacing.small * 2)
+                              height: ethConnectedText.implicitHeight + (Config.appearance.spacing.small * 0.5)
+
+                              IText {
+                                id: ethConnectedText
+                                anchors.centerIn: parent
+                                text: "Connected"
+                                pointSize: Config.appearance.font.size.smaller
+                                color: ThemeService.palette.mOnPrimary
+                              }
+                            }
+                          }
+                        }
+
+                        IIconButton {
+                          icon: "info"
+                          size: Config.appearance.widget.size * 0.7
+                          enabled: true
+                          onClicked: {
+                            if (NetworkService.activeEthernetIf === modelData.ifname && ethernetInfoExpanded) {
+                              ethernetInfoExpanded = false;
+                              return;
+                            }
+                            if (NetworkService.activeEthernetIf !== modelData.ifname) {
+                              NetworkService.activeEthernetIf = modelData.ifname;
+                              NetworkService.activeEthernetDetailsTimestamp = 0;
+                            }
+                            ethernetInfoExpanded = true;
+                            NetworkService.refreshActiveEthernetDetails();
+                          }
+                        }
+                      }
+
+                      // Tap handling
+                      TapHandler {
+                        target: ethHeaderRow
+                        onTapped: {
+                          if (NetworkService.activeEthernetIf === modelData.ifname && ethernetInfoExpanded) {
+                            ethernetInfoExpanded = false;
+                            return;
+                          }
+                          if (NetworkService.activeEthernetIf !== modelData.ifname) {
+                            NetworkService.activeEthernetIf = modelData.ifname;
+                            NetworkService.activeEthernetDetailsTimestamp = 0;
+                          }
+                          ethernetInfoExpanded = true;
+                          NetworkService.refreshActiveEthernetDetails();
+                        }
+                      }
+
+                      // Inline Ethernet details
+                      Rectangle {
+                        id: ethInfoInline
+                        visible: ethernetInfoExpanded && NetworkService.activeEthernetIf === modelData.ifname
+                        Layout.fillWidth: true
+                        color: ThemeService.palette.mSurfaceVariant
+                        radius: Settings.appearance.cornerRadius
+                        border.width: 1
+                        border.color: ThemeService.palette.mOutline
+                        implicitHeight: ethInfoGrid.implicitHeight + root.padding * 2
+                        clip: true
+                        Layout.topMargin: Config.appearance.spacing.small
+
+                        // Grid/List toggle
+                        IIconButton {
+                          anchors.top: parent.top
+                          anchors.right: parent.right
+                          anchors.margins: Config.appearance.spacing.small
+                          icon: ethernetDetailsGrid ? "view_list" : "grid_view"
+                          size: Config.appearance.widget.size * 0.6
+                          onClicked: ethernetDetailsGrid = !ethernetDetailsGrid
+                          z: 1
+                        }
+
+                        GridLayout {
+                          id: ethInfoGrid
                           anchors.fill: parent
-                          anchors.margins: root.spacing
-                          text: content.passwordInput
-                          font.pointSize: Config.appearance.font.size.small
-                          color: ThemeService.palette.mOnSurface
-                          echoMode: TextInput.Password
-                          selectByMouse: true
-                          focus: visible
-                          passwordCharacter: "●"
-                          onTextChanged: content.passwordInput = text
-                          onVisibleChanged: if (visible)
-                            forceActiveFocus()
-                          onAccepted: {
-                            if (text && !NetworkService.connecting) {
-                              NetworkService.connect(content.passwordSsid, text);
-                              content.passwordSsid = "";
-                              content.passwordInput = "";
+                          anchors.margins: Config.appearance.spacing.small
+                          anchors.rightMargin: Config.appearance.widget.size
+                          columns: ethernetDetailsGrid ? 2 : 1
+                          columnSpacing: root.spacing
+                          rowSpacing: Config.appearance.spacing.small
+
+                          // Interface name
+                          RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Config.appearance.spacing.small
+                            IIcon {
+                              icon: "ethernet"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                              // Layout.alignment: Qt.AlignVCenter
+                            }
+                            IText {
+                              text: (NetworkService.activeEthernetDetails.ifname && NetworkService.activeEthernetDetails.ifname.length > 0) ? NetworkService.activeEthernetDetails.ifname : (NetworkService.activeEthernetIf || "-")
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                              Layout.fillWidth: true
+                              wrapMode: ethernetDetailsGrid ? Text.NoWrap : Text.WrapAtWordBoundaryOrAnywhere
+                              elide: ethernetDetailsGrid ? Text.ElideRight : Text.ElideNone
+                              maximumLineCount: ethernetDetailsGrid ? 1 : 6
+                              clip: true
+
+                              MouseArea {
+                                anchors.fill: parent
+                                enabled: ((NetworkService.activeEthernetDetails.ifname || "").length > 0) || ((NetworkService.activeEthernetIf || "").length > 0)
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                  const value = (NetworkService.activeEthernetDetails.ifname && NetworkService.activeEthernetDetails.ifname.length > 0) ? NetworkService.activeEthernetDetails.ifname : (NetworkService.activeEthernetIf || "");
+                                  if (value.length > 0) {
+                                    Quickshell.execDetached(["wl-copy", value]);
+                                  }
+                                }
+                              }
                             }
                           }
 
-                          IText {
-                            visible: parent.text.length === 0
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "Enter password"
-                            color: ThemeService.palette.mOnSurfaceVariant
-                            pointSize: Config.appearance.font.size.small
+                          // Internet connectivity
+                          RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Config.appearance.spacing.small
+                            IIcon {
+                              icon: modelData.connected ? (NetworkService.internetConnectivity ? "public" : "public_off") : "public_off"
+                              pointSize: Config.appearance.font.size.small
+                              color: modelData.connected ? (NetworkService.internetConnectivity ? ThemeService.palette.mOnSurface : ThemeService.palette.mError) : ThemeService.palette.mError
+                            }
+                            IText {
+                              text: modelData.connected ? (NetworkService.internetConnectivity ? "Internet Connected" : "Limited Connection") : "Disconnected"
+                              pointSize: Config.appearance.font.size.small
+                              color: modelData.connected ? (NetworkService.internetConnectivity ? ThemeService.palette.mOnSurface : ThemeService.palette.mError) : ThemeService.palette.mError
+                              Layout.fillWidth: true
+                              wrapMode: ethernetDetailsGrid ? Text.NoWrap : Text.WrapAtWordBoundaryOrAnywhere
+                              elide: ethernetDetailsGrid ? Text.ElideRight : Text.ElideNone
+                              maximumLineCount: ethernetDetailsGrid ? 1 : 6
+                              clip: true
+                            }
+                          }
+
+                          // Link speed
+                          RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Config.appearance.spacing.small
+                            IIcon {
+                              icon: "speed"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                            }
+                            IText {
+                              text: (NetworkService.activeEthernetDetails.speed && NetworkService.activeEthernetDetails.speed.length > 0) ? NetworkService.activeEthernetDetails.speed : "-"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                              Layout.fillWidth: true
+                              wrapMode: ethernetDetailsGrid ? Text.NoWrap : Text.WrapAtWordBoundaryOrAnywhere
+                              elide: ethernetDetailsGrid ? Text.ElideRight : Text.ElideNone
+                              maximumLineCount: ethernetDetailsGrid ? 1 : 6
+                              clip: true
+                            }
+                          }
+
+                          // IPv4 address
+                          RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Config.appearance.spacing.small
+                            IIcon {
+                              icon: "lan"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                            }
+                            IText {
+                              text: NetworkService.activeEthernetDetails.ipv4 || "-"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                              Layout.fillWidth: true
+                              wrapMode: ethernetDetailsGrid ? Text.NoWrap : Text.WrapAtWordBoundaryOrAnywhere
+                              elide: ethernetDetailsGrid ? Text.ElideRight : Text.ElideNone
+                              maximumLineCount: ethernetDetailsGrid ? 1 : 6
+                              clip: true
+
+                              MouseArea {
+                                anchors.fill: parent
+                                enabled: (NetworkService.activeEthernetDetails.ipv4 || "").length > 0
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                  const value = NetworkService.activeEthernetDetails.ipv4 || "";
+                                  if (value.length > 0) {
+                                    Quickshell.execDetached(["wl-copy", value]);
+                                  }
+                                }
+                              }
+                            }
+                          }
+
+                          // Gateway
+                          RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Config.appearance.spacing.small
+                            IIcon {
+                              icon: "router"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                            }
+                            IText {
+                              text: NetworkService.activeEthernetDetails.gateway4 || "-"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                              Layout.fillWidth: true
+                              wrapMode: ethernetDetailsGrid ? Text.NoWrap : Text.WrapAtWordBoundaryOrAnywhere
+                              elide: ethernetDetailsGrid ? Text.ElideRight : Text.ElideNone
+                              maximumLineCount: ethernetDetailsGrid ? 1 : 6
+                              clip: true
+                            }
+                          }
+
+                          // DNS
+                          RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Config.appearance.spacing.small
+                            IIcon {
+                              icon: "dns"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                            }
+
+                            ColumnLayout {
+                              Layout.fillWidth: true
+                              spacing: 2
+                              visible: root.editingDnsIface === modelData.ifname
+
+                              Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: 32
+                                radius: 4
+                                color: ThemeService.palette.mSurface
+                                border.color: dnsEditInput.activeFocus ? ThemeService.palette.mPrimary : ThemeService.palette.mOutline
+                                border.width: 1
+
+                                TextInput {
+                                  id: dnsEditInput
+                                  anchors.fill: parent
+                                  anchors.margins: 4
+                                  text: root.dnsInput
+                                  font.pointSize: Config.appearance.font.size.small
+                                  color: ThemeService.palette.mOnSurface
+                                  onTextChanged: root.dnsInput = text
+                                  focus: visible
+                                }
+                              }
+
+                              RowLayout {
+                                spacing: 8
+                                IButton {
+                                  text: "Save"
+                                  fontSize: Config.appearance.font.size.smaller
+                                  onClicked: {
+                                    NetworkService.setDns(modelData.ifname, root.dnsInput);
+                                    root.editingDnsIface = "";
+                                  }
+                                }
+                                IButton {
+                                  text: "Cancel"
+                                  fontSize: Config.appearance.font.size.smaller
+                                  outlined: true
+                                  onClicked: root.editingDnsIface = ""
+                                }
+                              }
+                            }
+
+                            IText {
+                              visible: root.editingDnsIface !== modelData.ifname
+                              text: NetworkService.activeEthernetDetails.dns || "-"
+                              pointSize: Config.appearance.font.size.small
+                              color: ThemeService.palette.mOnSurface
+                              Layout.fillWidth: true
+                              wrapMode: ethernetDetailsGrid ? Text.NoWrap : Text.WrapAtWordBoundaryOrAnywhere
+                              elide: ethernetDetailsGrid ? Text.ElideRight : Text.ElideNone
+                              maximumLineCount: ethernetDetailsGrid ? 1 : 6
+                              clip: true
+                            }
+
+                            IIconButton {
+                              visible: root.editingDnsIface !== modelData.ifname && modelData.connected
+                              icon: "edit"
+                              size: 24
+                              onClicked: {
+                                root.dnsInput = NetworkService.activeEthernetDetails.dns || "";
+                                root.editingDnsIface = modelData.ifname;
+                              }
+                            }
                           }
                         }
-                      }
-
-                      IButton {
-                        text: "Connect"
-                        fontSize: Config.appearance.font.size.small
-                        enabled: content.passwordInput.length > 0 && !NetworkService.connecting
-                        outlined: true
-                        onClicked: {
-                          NetworkService.connect(content.passwordSsid, content.passwordInput);
-                          content.passwordSsid = "";
-                          content.passwordInput = "";
-                        }
-                      }
-
-                      IIconButton {
-                        icon: "close"
-                        size: Config.appearance.widget.size * 0.8
-                        onClicked: {
-                          content.passwordSsid = "";
-                          content.passwordInput = "";
-                        }
-                      }
-                    }
-                  }
-
-                  Rectangle {
-                    visible: content.expandedSsid === wifiItem.modelData.ssid
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: forgetRow.implicitHeight + (root.padding * 2)
-                    color: ThemeService.palette.mSurfaceVariant
-                    radius: Settings.appearance.cornerRadius
-                    border.width: 2
-                    border.color: Qt.alpha(ThemeService.palette.mOutline, 0.4)
-
-                    RowLayout {
-                      id: forgetRow
-                      anchors.fill: parent
-                      anchors.margins: root.padding
-                      spacing: spacing
-
-                      RowLayout {
-                        IIcon {
-                          icon: "delete"
-                          pointSize: Config.appearance.font.size.large
-                          color: ThemeService.palette.mError
-                        }
-
-                        IText {
-                          text: "Forget this network?"
-                          pointSize: Config.appearance.font.size.small
-                          color: ThemeService.palette.mError
-                          Layout.fillWidth: true
-                        }
-                      }
-
-                      IButton {
-                        id: forgetButton
-                        text: "Forget"
-                        fontSize: Config.appearance.font.size.small
-                        backgroundColor: ThemeService.palette.mError
-                        outlined: forgetButton.hovered ? false : true
-                        onClicked: {
-                          NetworkService.forget(wifiItem.modelData.ssid);
-                          content.expandedSsid = "";
-                        }
-                      }
-
-                      IIconButton {
-                        icon: "close"
-                        size: Config.appearance.widget.size * 0.8
-                        onClicked: content.expandedSsid = ""
                       }
                     }
                   }
                 }
               }
             }
-          }
-        }
-
-        ColumnLayout {
-          id: emptyState
-          visible: Settings.network.wifiEnabled && !NetworkService.scanning && Object.keys(NetworkService.networks).length === 0
-          anchors.fill: parent
-          anchors.margins: root.padding
-          spacing: spacing
-
-          Item {
-            Layout.fillHeight: true
-          }
-
-          IIcon {
-            icon: "search"
-            pointSize: Config.appearance.widget.size
-            color: ThemeService.palette.mOnSurfaceVariant
-            Layout.alignment: Qt.AlignHCenter
-          }
-
-          IText {
-            text: "No networks found"
-            pointSize: Config.appearance.font.size.large
-            color: ThemeService.palette.mOnSurfaceVariant
-            Layout.alignment: Qt.AlignHCenter
-          }
-
-          IButton {
-            text: "Scan again"
-            icon: "refresh"
-            Layout.alignment: Qt.AlignHCenter
-            onClicked: NetworkService.scan()
-          }
-
-          Item {
-            Layout.fillHeight: true
           }
         }
       }

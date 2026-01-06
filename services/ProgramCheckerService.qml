@@ -10,11 +10,13 @@ Singleton {
   property bool matugenAvailable: false
   property bool app2unitAvailable: false
   property bool imagemagickAvailable: false
+  property bool nmcliAvailable: false
 
   readonly property var programsToCheck: ({
       "matugenAvailable": ["which", "matugen"],
       "app2unitAvailable": ["which", "app2unit"],
-      "imagemagickAvailable": ["which", "magick"]
+      "imagemagickAvailable": ["which", "magick"],
+      "nmcliAvailable": ["which", "nmcli"]
     })
 
   property var checkQueue: []

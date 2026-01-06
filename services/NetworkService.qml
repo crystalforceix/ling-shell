@@ -14,12 +14,24 @@ Singleton {
   property string connectingTo: ""
   property string lastError: ""
   property bool ethernetConnected: false
+  property var ethernetInterfaces: ([])
+  property var activeEthernetDetails: ({})
+  property string activeEthernetIf: ""
+  property bool ethernetDetailsLoading: false
+  property double activeEthernetDetailsTimestamp: 0
+  property int activeEthernetDetailsTtlMs: 5000
   property string disconnectingFrom: ""
   property string forgettingNetwork: ""
-  property string internetConnectivity: "unknown"
-
+  property string networkConnectivity: "unknown"
+  property bool internetConnectivity: true
   property bool ignoreScanResults: false
   property bool scanPending: false
+
+  property var activeWifiDetails: ({})
+  property string activeWifiIf: ""
+  property bool detailsLoading: false
+  property double activeWifiDetailsTimestamp: 0
+  property int activeWifiDetailsTtlMs: 5000
 
   property string cacheFile: Directories.shellStateNetworkPath
   readonly property string cachedLastConnected: cacheAdapter.lastConnected
@@ -62,14 +74,49 @@ Singleton {
   }
 
   Component.onCompleted: {
-    syncWifiState();
-    scan();
+    console.info("Network: Service started");
+    if (ProgramCheckerService.nmcliAvailable) {
+      syncWifiState();
+      scan();
+      ethernetStateProcess.running = true;
+      refreshActiveWifiDetails();
+      refreshActiveEthernetDetails();
+    }
+  }
+
+  Connections {
+    target: ProgramCheckerService
+    function onNmcliAvailableChanged() {
+      if (ProgramCheckerService.nmcliAvailable) {
+        syncWifiState();
+        scan();
+        ethernetStateProcess.running = true;
+        refreshActiveWifiDetails();
+        refreshActiveEthernetDetails();
+      }
+    }
   }
 
   Timer {
     id: saveDebounce
     interval: 1000
     onTriggered: cacheFileView.writeAdapter()
+  }
+
+  function refreshActiveWifiDetails() {
+    const now = Date.now();
+    if (detailsLoading)
+      return;
+
+    if (activeWifiIf && activeWifiDetails && (now - activeWifiDetailsTimestamp) < activeWifiDetailsTtlMs)
+      return;
+
+    detailsLoading = true;
+    wifiDeviceListProcess.running = true;
+  }
+
+  function saveCache() {
+    saveDebounce.restart();
   }
 
   Timer {
@@ -81,34 +128,53 @@ Singleton {
   Timer {
     id: ethernetCheckTimer
     interval: 30000
-    running: true
+    running: ProgramCheckerService.nmcliAvailable
     repeat: true
     onTriggered: ethernetStateProcess.running = true
   }
 
+  function refreshActiveEthernetDetails() {
+    const now = Date.now();
+    if (ethernetDetailsLoading)
+      return;
+    if (!root.ethernetConnected) {
+      root.activeEthernetDetails = ({});
+      root.activeEthernetDetailsTimestamp = now;
+      return;
+    }
+    if (activeEthernetIf && activeEthernetDetails && (now - activeEthernetDetailsTimestamp) < activeEthernetDetailsTtlMs)
+      return;
+
+    ethernetDetailsLoading = true;
+    ethernetDeviceListProcess.running = true;
+  }
+
   Timer {
     id: connectivityCheckTimer
-    interval: 10000
-    running: true
+    interval: 15000
+    running: ProgramCheckerService.nmcliAvailable
     repeat: true
     onTriggered: connectivityCheckProcess.running = true
   }
 
-  function saveCache() {
-    saveDebounce.restart();
-  }
   function syncWifiState() {
+    if (!ProgramCheckerService.nmcliAvailable)
+      return;
     wifiStateProcess.running = true;
   }
+
   function setWifiEnabled(enabled) {
+    if (!ProgramCheckerService.nmcliAvailable)
+      return;
     Settings.network.wifiEnabled = enabled;
     wifiStateEnableProcess.running = true;
   }
 
   function scan() {
-    if (!Settings.network.wifiEnabled)
+    if (!ProgramCheckerService.nmcliAvailable || !Settings.network.wifiEnabled)
       return;
     if (scanning) {
+      console.debug("Network", "Scan already in progress, will ignore results and rescan");
       ignoreScanResults = true;
       scanPending = true;
       return;
@@ -117,43 +183,62 @@ Singleton {
     scanning = true;
     lastError = "";
     ignoreScanResults = false;
+
     profileCheckProcess.running = true;
+    console.debug("Network", "Wi-Fi scan in progress...");
+  }
+
+  function hasEthernet() {
+    return root.ethernetInterfaces && root.ethernetInterfaces.length > 0;
+  }
+
+  function refreshEthernet() {
+    if (!ProgramCheckerService.nmcliAvailable)
+      return;
+    ethernetStateProcess.running = true;
+    refreshActiveEthernetDetails();
   }
 
   function connect(ssid, password = "") {
-    if (connecting)
+    if (!ProgramCheckerService.nmcliAvailable || connecting)
       return;
     connecting = true;
     connectingTo = ssid;
     lastError = "";
 
-    if (networks[ssid]?.existing || cachedNetworks[ssid]) {
+    if ((networks[ssid] && networks[ssid].existing) || cachedNetworks[ssid]) {
       connectProcess.mode = "saved";
+      connectProcess.ssid = ssid;
       connectProcess.password = "";
     } else {
       connectProcess.mode = "new";
+      connectProcess.ssid = ssid;
       connectProcess.password = password;
     }
 
-    connectProcess.ssid = ssid;
     connectProcess.running = true;
   }
 
   function disconnect(ssid) {
+    if (!ProgramCheckerService.nmcliAvailable)
+      return;
     disconnectingFrom = ssid;
     disconnectProcess.ssid = ssid;
     disconnectProcess.running = true;
   }
 
   function forget(ssid) {
+    if (!ProgramCheckerService.nmcliAvailable)
+      return;
     forgettingNetwork = ssid;
 
     let known = cacheAdapter.knownNetworks;
     delete known[ssid];
     cacheAdapter.knownNetworks = known;
 
-    if (cacheAdapter.lastConnected === ssid)
+    if (cacheAdapter.lastConnected === ssid) {
       cacheAdapter.lastConnected = "";
+    }
 
     saveCache();
 
@@ -161,12 +246,22 @@ Singleton {
     forgetProcess.running = true;
   }
 
+  function setDns(deviceName, dnsServers) {
+    if (!ProgramCheckerService.nmcliAvailable)
+      return;
+    dnsProcess.deviceName = deviceName;
+    dnsProcess.dnsServers = dnsServers;
+    dnsProcess.running = true;
+  }
+
   function updateNetworkStatus(ssid, connected) {
     let nets = networks;
 
-    for (let key in nets)
-      if (nets[key].connected && key !== ssid)
+    for (let key in nets) {
+      if (nets[key].connected && key !== ssid) {
         nets[key].connected = false;
+      }
+    }
 
     if (nets[ssid]) {
       nets[ssid].connected = connected;
@@ -187,8 +282,10 @@ Singleton {
     networks = nets;
   }
 
-  function signalIcon(signal, isConnected = false) {
-    if (isConnected && (internetConnectivity === "limited" || internetConnectivity === "portal"))
+  function signalIcon(signal, isConnected) {
+    if (isConnected === undefined)
+      isConnected = false;
+    if (isConnected && !root.internetConnectivity)
       return "wifi_off";
     if (signal >= 80)
       return "wifi";
@@ -203,19 +300,440 @@ Singleton {
     return security && security !== "--" && security.trim() !== "";
   }
 
+  function getSignalStrengthLabel(signal) {
+    if (signal >= 80)
+      return "Excellent";
+    if (signal >= 50)
+      return "Good";
+    if (signal >= 20)
+      return "Fair";
+    return "Poor";
+  }
+
   Process {
     id: ethernetStateProcess
-    running: true
+    running: ProgramCheckerService.nmcliAvailable
     command: ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device"]
 
     stdout: StdioCollector {
       onStreamFinished: {
-        const connected = text.split("\n").some(line => {
-          const parts = line.split(":");
-          return parts[1] === "ethernet" && parts[2] === "connected";
+        let connected = false;
+        let devIf = "";
+        let lines = text.split("\n");
+        let ethList = [];
+        for (let i = 0; i < lines.length; i++) {
+          let parts = lines[i].split(":");
+          if (parts.length >= 3 && parts[1] === "ethernet") {
+            let ifname = parts[0];
+            let state = parts[2];
+            let isConn = state === "connected";
+            ethList.push({
+              ifname: ifname,
+              state: state,
+              connected: isConn
+            });
+            if (isConn && !connected) {
+              connected = true;
+              devIf = ifname;
+            }
+          }
+        }
+        ethList.sort(function (a, b) {
+          if (a.connected !== b.connected)
+            return a.connected ? -1 : 1;
+          return a.ifname.localeCompare(b.ifname);
         });
-        if (root.ethernetConnected !== connected)
+        root.ethernetInterfaces = ethList;
+
+        if (root.ethernetConnected !== connected) {
           root.ethernetConnected = connected;
+          console.debug("Network", "Ethernet connected:", root.ethernetConnected);
+        }
+        if (connected) {
+          if (root.activeEthernetIf !== devIf) {
+            root.activeEthernetIf = devIf;
+            root.activeEthernetDetailsTimestamp = 0;
+          }
+          root.refreshActiveEthernetDetails();
+        } else {
+          root.activeEthernetDetails = ({});
+          root.activeEthernetDetailsTimestamp = Date.now();
+        }
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "ethernetState nmcli stderr:", text.trim());
+        }
+      }
+    }
+  }
+
+  Process {
+    id: ethernetDeviceListProcess
+    running: false
+    command: ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device"]
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        let ifname = "";
+        const lines = text.split("\n");
+        const ethList = [];
+        for (let i = 0; i < lines.length; i++) {
+          const parts = lines[i].trim().split(":");
+          if (parts.length >= 3) {
+            const dev = parts[0];
+            const type = parts[1];
+            const state = parts[2];
+            if (type === "ethernet" && state === "connected") {
+              ifname = dev;
+            }
+            if (type === "ethernet") {
+              ethList.push({
+                ifname: dev,
+                state: state,
+                connected: state === "connected"
+              });
+            }
+          }
+        }
+        ethList.sort(function (a, b) {
+          if (a.connected !== b.connected)
+            return a.connected ? -1 : 1;
+          return a.ifname.localeCompare(b.ifname);
+        });
+        root.ethernetInterfaces = ethList;
+        if (ifname) {
+          if (root.activeEthernetIf !== ifname)
+            root.activeEthernetIf = ifname;
+          ethernetDeviceShowProcess.ifname = ifname;
+          ethernetDeviceShowProcess.running = true;
+        } else {
+          root.activeEthernetDetailsTimestamp = Date.now();
+          root.ethernetDetailsLoading = false;
+        }
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "nmcli device list (eth) stderr:", text.trim());
+        }
+        if (!root.activeEthernetIf) {
+          root.activeEthernetDetailsTimestamp = Date.now();
+          root.ethernetDetailsLoading = false;
+        }
+      }
+    }
+  }
+
+  Process {
+    id: ethernetDeviceShowProcess
+    property string ifname: ""
+    running: false
+    command: ["nmcli", "-t", "-f", "GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS", "device", "show", ifname]
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        const details = root.activeEthernetDetails || ({});
+        let connName = "";
+        let ipv4 = "";
+        let gw4 = "";
+        let dnsServers = [];
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line)
+            continue;
+          const idx = line.indexOf(":");
+          if (idx === -1)
+            continue;
+          const key = line.substring(0, idx);
+          const val = line.substring(idx + 1);
+          if (key === "GENERAL.CONNECTION") {
+            connName = val;
+          } else if (key.indexOf("IP4.ADDRESS") === 0) {
+            ipv4 = val.split("/")[0];
+          } else if (key === "IP4.GATEWAY") {
+            gw4 = val;
+          } else if (key.indexOf("IP4.DNS") === 0) {
+            if (val && dnsServers.indexOf(val) === -1)
+              dnsServers.push(val);
+          }
+        }
+        details.ifname = ethernetDeviceShowProcess.ifname;
+        details.connectionName = connName;
+        details.speed = details.speed && details.speed.length > 0 ? details.speed : "";
+        details.ipv4 = ipv4;
+        details.gateway4 = gw4;
+        details.dnsServers = dnsServers;
+        details.dns = dnsServers.join(", ");
+        root.activeEthernetDetails = details;
+        if (!details.speed || details.speed.length === 0) {
+          ethernetSysfsSpeedProcess.ifname = ethernetDeviceShowProcess.ifname;
+          ethernetSysfsSpeedProcess.running = true;
+        } else {
+          root.activeEthernetDetailsTimestamp = Date.now();
+          root.ethernetDetailsLoading = false;
+        }
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "nmcli device show (eth) stderr:", text.trim());
+        }
+        root.activeEthernetDetailsTimestamp = Date.now();
+        root.ethernetDetailsLoading = false;
+      }
+    }
+  }
+
+  Process {
+    id: ethernetSysfsSpeedProcess
+    property string ifname: ""
+    running: false
+    command: ["sh", "-c", "cat '/sys/class/net/" + ifname + "/speed' 2>/dev/null || true"]
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        const details = root.activeEthernetDetails || ({});
+        let speedText = "";
+        const v = text.trim();
+        const num = parseFloat(v);
+        if (!isNaN(num) && num > 0) {
+          details.speed = Math.round(num) + " Mbit/s";
+          details.speedMbit = num;
+          root.activeEthernetDetails = details;
+          root.activeEthernetDetailsTimestamp = Date.now();
+          root.ethernetDetailsLoading = false;
+        } else {
+          ethernetEthtoolProcess.ifname = ethernetSysfsSpeedProcess.ifname;
+          ethernetEthtoolProcess.running = true;
+        }
+      }
+    }
+    stderr: StdioCollector {}
+  }
+
+  Process {
+    id: ethernetEthtoolProcess
+    property string ifname: ""
+    running: false
+    command: ["sh", "-c", "ethtool '" + ifname + "' 2>/dev/null || true"]
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        const details = root.activeEthernetDetails || ({});
+        let speedText = "";
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.toLowerCase().indexOf("speed:") === 0) {
+            const v = line.substring(6).trim();
+            if (v) {
+              const normalized = v.replace(/mb\/?s/i, "Mbit/s").replace(/\s+/g, " ");
+              speedText = normalized;
+            }
+            break;
+          }
+        }
+        if (speedText && speedText.length > 0) {
+          details.speed = speedText;
+          const m = speedText.match(/([0-9]+(?:\.[0-9]+)?)\s*Mbit\/s/i);
+          if (m)
+            details.speedMbit = parseFloat(m[1]);
+          root.activeEthernetDetails = details;
+        }
+        root.activeEthernetDetailsTimestamp = Date.now();
+        root.ethernetDetailsLoading = false;
+      }
+    }
+    stderr: StdioCollector {}
+  }
+
+  Process {
+    id: wifiDeviceListProcess
+    running: false
+    command: ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device"]
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        let ifname = "";
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const parts = lines[i].trim().split(":");
+          if (parts.length >= 3) {
+            const dev = parts[0];
+            const type = parts[1];
+            const state = parts[2];
+            if (type === "wifi" && state === "connected") {
+              ifname = dev;
+              break;
+            }
+          }
+        }
+        root.activeWifiIf = ifname;
+        if (ifname) {
+          wifiDeviceShowProcess.ifname = ifname;
+          wifiDeviceShowProcess.running = true;
+        } else {
+          root.activeWifiDetailsTimestamp = Date.now();
+          root.detailsLoading = false;
+        }
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "nmcli device list stderr:", text.trim());
+        }
+        if (!root.activeWifiIf) {
+          root.activeWifiDetailsTimestamp = Date.now();
+          root.detailsLoading = false;
+        }
+      }
+    }
+  }
+
+  Process {
+    id: wifiDeviceShowProcess
+    property string ifname: ""
+    running: false
+    command: ["nmcli", "-t", "-f", "IP4.ADDRESS,IP4.GATEWAY,IP4.DNS", "device", "show", ifname]
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        const details = root.activeWifiDetails || ({});
+        let ipv4 = "";
+        let gw4 = "";
+        let dnsServers = [];
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line)
+            continue;
+          const idx = line.indexOf(":");
+          if (idx === -1)
+            continue;
+          const key = line.substring(0, idx);
+          const val = line.substring(idx + 1);
+          if (key.indexOf("IP4.ADDRESS") === 0) {
+            ipv4 = val.split("/")[0];
+          } else if (key === "IP4.GATEWAY") {
+            gw4 = val;
+          } else if (key.indexOf("IP4.DNS") === 0) {
+            if (val && dnsServers.indexOf(val) === -1) {
+              dnsServers.push(val);
+            }
+          }
+        }
+        details.ipv4 = ipv4;
+        details.gateway4 = gw4;
+        details.dnsServers = dnsServers;
+        details.dns = dnsServers.join(", ");
+        root.activeWifiDetails = details;
+
+        wifiIwLinkProcess.ifname = wifiDeviceShowProcess.ifname;
+        wifiIwLinkProcess.running = true;
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "nmcli device show stderr:", text.trim());
+        }
+        root.activeWifiDetailsTimestamp = Date.now();
+      }
+    }
+  }
+
+  Process {
+    id: wifiIwLinkProcess
+    property string ifname: ""
+    running: false
+    command: ["sh", "-c", "iw dev '" + ifname + "' link 2>/dev/null || true"]
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        const details = root.activeWifiDetails || ({});
+        let rate = "";
+        let freq = "";
+        const lines = text.split("\n");
+        for (let k = 0; k < lines.length; k++) {
+          let line2 = lines[k].trim();
+          let low = line2.toLowerCase();
+          if (low.indexOf("tx bitrate:") === 0) {
+            rate = line2.substring(11).trim();
+          } else if (low.indexOf("freq:") === 0) {
+            freq = line2.substring(5).trim();
+          }
+        }
+
+        let band = "";
+        if (freq) {
+          const f = +freq;
+          if (f) {
+            switch (true) {
+            case (f >= 5925 && f < 7125):
+              band = "6 GHz";
+              break;
+            case (f >= 5150 && f < 5925):
+              band = "5 GHz";
+              break;
+            case (f >= 2400 && f < 2500):
+              band = "2.4 GHz";
+              break;
+            default:
+              band = `${f} MHz`;
+            }
+          }
+        }
+
+        let rateShort = "";
+        if (rate) {
+          let parts = rate.trim().split(" ");
+          let compact = [];
+          for (let i = 0; i < parts.length; i++) {
+            let p = parts[i];
+            if (p && p.length > 0)
+              compact.push(p);
+          }
+          let unitIdx = -1;
+          for (let j = 0; j < compact.length; j++) {
+            let token = compact[j].toLowerCase();
+            if (token === "mbit/s" || token === "mb/s" || token === "mbits/s") {
+              unitIdx = j;
+              break;
+            }
+          }
+          if (unitIdx > 0) {
+            let num = compact[unitIdx - 1];
+            let parsed = parseFloat(num);
+            if (!isNaN(parsed)) {
+              rateShort = parsed + " Mbit/s";
+            }
+          }
+          if (!rateShort) {
+            rateShort = compact.slice(0, 2).join(" ");
+          }
+        }
+        details.rate = rate;
+        details.rateShort = rateShort;
+        details.band = band;
+        root.activeWifiDetails = details;
+        root.activeWifiDetailsTimestamp = Date.now();
+        root.detailsLoading = false;
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "iw link stderr:", text.trim());
+        }
+        root.activeWifiDetailsTimestamp = Date.now();
+        root.detailsLoading = false;
       }
     }
   }
@@ -228,8 +746,17 @@ Singleton {
     stdout: StdioCollector {
       onStreamFinished: {
         const enabled = text.trim() === "enabled";
-        if (Settings.network.wifiEnabled !== enabled)
+        console.debug("Network", "Wi-Fi adapter was detect as enabled:", enabled);
+        if (Settings.network.wifiEnabled !== enabled) {
           Settings.network.wifiEnabled = enabled;
+        }
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "Wi-Fi state query stderr:", text.trim());
+        }
       }
     }
   }
@@ -240,27 +767,85 @@ Singleton {
     command: ["nmcli", "radio", "wifi", Settings.network.wifiEnabled ? "on" : "off"]
 
     stdout: StdioCollector {
-      onStreamFinished: syncWifiState()
+      onStreamFinished: {
+        console.info("Network", "Wi-Fi state change command executed.");
+        syncWifiState();
+      }
+    }
+
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text.trim()) {
+          console.warn("Network", "Error changing Wi-Fi state: " + text);
+        }
+      }
     }
   }
 
   Process {
     id: connectivityCheckProcess
     running: false
-    command: ["nmcli", "networking", "connectivity"]
+    command: ["nmcli", "networking", "connectivity", "check"]
+
+    property int failedChecks: 0
 
     stdout: StdioCollector {
       onStreamFinished: {
         const result = text.trim();
-        if (result && result !== root.internetConnectivity) {
-          root.internetConnectivity = result;
+        if (!result) {
+          return;
+        }
 
-          if (result === "limited" || result === "portal")
-            ToastService.showWarning(cachedLastConnected, "toast.internet.limited");
-          else
-            scan();
+        if (result === "none" && root.networkConnectivity !== result) {
+          root.networkConnectivity = result;
+          connectivityCheckProcess.failedChecks = 0;
+          root.scan();
+        }
+
+        if (result === "full" && root.networkConnectivity !== result) {
+          root.networkConnectivity = result;
+          root.internetConnectivity = true;
+          connectivityCheckProcess.failedChecks = 0;
+          root.scan();
+        }
+
+        if ((result === "limited" || result === "portal") && root.networkConnectivity !== result) {
+          connectivityCheckProcess.failedChecks++;
+          if (connectivityCheckProcess.failedChecks === 3) {
+            root.networkConnectivity = result;
+            pingCheckProcess.running = true;
+          }
+        }
+
+        if (result === "unknown" && root.networkConnectivity !== result) {
+          root.networkConnectivity = result;
+          connectivityCheckProcess.failedChecks = 0;
         }
       }
+    }
+
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text.trim()) {
+          console.warn("Network", "Connectivity check error: " + text);
+        }
+      }
+    }
+  }
+
+  Process {
+    id: pingCheckProcess
+
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode === 0) {
+        connectivityCheckProcess.failedChecks = 0;
+      } else {
+        root.internetConnectivity = false;
+        console.info("Network", "No internet connectivity");
+        ToastService.showWarning(root.cachedLastConnected, "toast.internet-limited");
+        connectivityCheckProcess.failedChecks = 0;
+      }
+      root.scan();
     }
   }
 
@@ -272,7 +857,9 @@ Singleton {
     stdout: StdioCollector {
       onStreamFinished: {
         if (root.ignoreScanResults) {
+          console.debug("Network", "Ignoring profile check results (new scan requested)");
           root.scanning = false;
+
           if (root.scanPending) {
             root.scanPending = false;
             delayedScanTimer.interval = 100;
@@ -281,13 +868,28 @@ Singleton {
           return;
         }
 
-        const profiles = {};
-        const lines = text.split("\n").filter(l => l.trim());
-        for (const line of lines)
-          profiles[line.trim()] = true;
-
+        var profiles = {};
+        var lines = text.split("\n");
+        for (var i = 0; i < lines.length; i++) {
+          var l = lines[i];
+          if (l && l.trim()) {
+            profiles[l.trim()] = true;
+          }
+        }
         scanProcess.existingProfiles = profiles;
         scanProcess.running = true;
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim()) {
+          console.warn("Network", "Profile check stderr:", text.trim());
+          if (root.scanning) {
+            root.scanning = false;
+            delayedScanTimer.interval = 5000;
+            delayedScanTimer.restart();
+          }
+        }
       }
     }
   }
@@ -295,13 +897,16 @@ Singleton {
   Process {
     id: scanProcess
     running: false
-    property var existingProfiles: ({})
     command: ["nmcli", "-t", "-f", "SSID,SECURITY,SIGNAL,IN-USE", "device", "wifi", "list", "--rescan", "yes"]
+
+    property var existingProfiles: ({})
 
     stdout: StdioCollector {
       onStreamFinished: {
         if (root.ignoreScanResults) {
+          console.debug("Network", "Ignoring scan results (new scan requested)");
           root.scanning = false;
+
           if (root.scanPending) {
             root.scanPending = false;
             delayedScanTimer.interval = 100;
@@ -313,17 +918,37 @@ Singleton {
         const lines = text.split("\n");
         const networksMap = {};
 
-        for (let line of lines) {
-          line = line.trim();
+        for (let i = 0; i < lines.length; ++i) {
+          const line = lines[i].trim();
           if (!line)
             continue;
-          const parts = line.split(":");
-          if (parts.length < 4)
+
+          const lastColonIdx = line.lastIndexOf(":");
+          if (lastColonIdx === -1) {
+            console.warn("Network", "Malformed nmcli output line:", line);
             continue;
-          const inUse = parts.pop();
-          const signal = parts.pop();
-          const security = parts.pop();
-          const ssid = parts.join(":");
+          }
+
+          const inUse = line.substring(lastColonIdx + 1);
+          const remainingLine = line.substring(0, lastColonIdx);
+
+          const secondLastColonIdx = remainingLine.lastIndexOf(":");
+          if (secondLastColonIdx === -1) {
+            console.warn("Network", "Malformed nmcli output line:", line);
+            continue;
+          }
+
+          const signal = remainingLine.substring(secondLastColonIdx + 1);
+          const remainingLine2 = remainingLine.substring(0, secondLastColonIdx);
+
+          const thirdLastColonIdx = remainingLine2.lastIndexOf(":");
+          if (thirdLastColonIdx === -1) {
+            console.warn("Network", "Malformed nmcli output line:", line);
+            continue;
+          }
+
+          const security = remainingLine2.substring(thirdLastColonIdx + 1);
+          const ssid = remainingLine2.substring(0, thirdLastColonIdx);
 
           if (ssid) {
             const signalInt = parseInt(signal) || 0;
@@ -345,8 +970,9 @@ Singleton {
               };
             } else {
               const existingNet = networksMap[ssid];
-              if (connected)
+              if (connected) {
                 existingNet.connected = true;
+              }
               if (signalInt > existingNet.signal) {
                 existingNet.signal = signalInt;
                 existingNet.security = security || "--";
@@ -355,8 +981,42 @@ Singleton {
           }
         }
 
+        const oldSSIDs = Object.keys(root.networks);
+        const newSSIDs = Object.keys(networksMap);
+        const newNetworks = newSSIDs.filter(function (ssid) {
+          return oldSSIDs.indexOf(ssid) === -1;
+        });
+        const lostNetworks = oldSSIDs.filter(function (ssid) {
+          return newSSIDs.indexOf(ssid) === -1;
+        });
+
+        if (newNetworks.length > 0 || lostNetworks.length > 0) {
+          if (newNetworks.length > 0) {
+            console.debug("Network", "New Wi-Fi SSID discovered:", newNetworks.join(", "));
+          }
+          if (lostNetworks.length > 0) {
+            console.debug("Network", "Wi-Fi SSID disappeared:", lostNetworks.join(", "));
+          }
+          console.debug("Network", "Total Wi-Fi SSIDs:", Object.keys(networksMap).length);
+        }
+
+        console.debug("Network", "Wi-Fi scan completed");
         root.networks = networksMap;
         root.scanning = false;
+
+        let hasConnected = false;
+        for (let ssid in networksMap) {
+          if (networksMap.hasOwnProperty(ssid)) {
+            let net = networksMap[ssid];
+            if (net && net.connected) {
+              hasConnected = true;
+              break;
+            }
+          }
+        }
+        if (hasConnected) {
+          root.refreshActiveWifiDetails();
+        }
 
         if (root.scanPending) {
           root.scanPending = false;
@@ -365,8 +1025,19 @@ Singleton {
         }
       }
     }
-  }
 
+    stderr: StdioCollector {
+      onStreamFinished: {
+        root.scanning = false;
+        if (text.trim()) {
+          console.warn("Network", "Scan error: " + text);
+
+          delayedScanTimer.interval = 5000;
+          delayedScanTimer.restart();
+        }
+      }
+    }
+  }
   Process {
     id: connectProcess
     property string mode: "new"
@@ -375,25 +1046,29 @@ Singleton {
     running: false
 
     command: {
-      if (mode === "saved")
+      if (mode === "saved") {
         return ["nmcli", "connection", "up", "id", ssid];
-      const cmd = ["nmcli", "device", "wifi", "connect", ssid];
-      if (password)
-        cmd.push("password", password);
-      return cmd;
+      } else {
+        let cmd = ["nmcli", "device", "wifi", "connect", ssid];
+        if (password) {
+          cmd.push("password", password);
+        }
+        return cmd;
+      }
     }
-
-    environment: {
-      "LC_ALL": "C"
-    }
+    environment: ({
+        "LC_ALL": "C"
+      })
 
     stdout: StdioCollector {
       onStreamFinished: {
         const output = text.trim();
-        if (!output.includes("successfully activated") && !output.includes("Connection successfully"))
-          return;
-        let known = cacheAdapter.knownNetworks;
 
+        if (!output || (output.indexOf("successfully activated") === -1 && output.indexOf("Connection successfully") === -1)) {
+          return;
+        }
+
+        let known = cacheAdapter.knownNetworks;
         known[connectProcess.ssid] = {
           "profileName": connectProcess.ssid,
           "lastConnected": Date.now()
@@ -403,10 +1078,13 @@ Singleton {
         saveCache();
 
         root.updateNetworkStatus(connectProcess.ssid, true);
+
+        root.refreshActiveWifiDetails();
+
         root.connecting = false;
         root.connectingTo = "";
-
-        ToastService.showNotice("Wi-fi", "Connected: " + connectProcess.ssid, "wifi");
+        console.info("Network", "Connected to network: '" + connectProcess.ssid + "'");
+        ToastService.showNotice("Wi-Fi", "Connected to " + connectProcess.ssid, "wifi");
 
         delayedScanTimer.interval = 5000;
         delayedScanTimer.restart();
@@ -417,16 +1095,22 @@ Singleton {
       onStreamFinished: {
         root.connecting = false;
         root.connectingTo = "";
-        if (!text.trim())
-          return;
-        if (text.includes("Secrets were required") || text.includes("no secrets provided"))
-          root.lastError = "Incorrect password", forget(connectProcess.ssid);
-        else if (text.includes("No network with SSID"))
-          root.lastError = "Network not found";
-        else if (text.includes("Timeout"))
-          root.lastError = "Connection timeout";
-        else
-          root.lastError = text.split("\n")[0].trim();
+
+        if (text.trim()) {
+          if (text.indexOf("Secrets were required") !== -1 || text.indexOf("no secrets provided") !== -1) {
+            root.lastError = "Incorrect password";
+            forget(connectProcess.ssid);
+          } else if (text.indexOf("No network with SSID") !== -1) {
+            root.lastError = "Network not found";
+          } else if (text.indexOf("Timeout") !== -1) {
+            root.lastError = "Connection timeout";
+          } else {
+            root.lastError = "Connection failed";
+          }
+
+          console.warn("Network", "Connect error: " + text);
+          ToastService.showWarning("Wi-Fi", root.lastError || "Connection failed");
+        }
       }
     }
   }
@@ -439,9 +1123,12 @@ Singleton {
 
     stdout: StdioCollector {
       onStreamFinished: {
-        ToastService.showNotice("Wi-fi", "Disconnected: " + disconnectProcess.ssid, "wifi_off");
+        console.info("Network", "Disconnected from network: '" + disconnectProcess.ssid + "'");
+        ToastService.showNotice("Wi-Fi", "Disconnected from " + disconnectProcess.ssid, "wifi_off");
+
         root.updateNetworkStatus(disconnectProcess.ssid, false);
         root.disconnectingFrom = "";
+
         delayedScanTimer.interval = 1000;
         delayedScanTimer.restart();
       }
@@ -450,6 +1137,9 @@ Singleton {
     stderr: StdioCollector {
       onStreamFinished: {
         root.disconnectingFrom = "";
+        if (text.trim()) {
+          console.warn("Network", "Disconnect error: " + text);
+        }
         delayedScanTimer.interval = 5000;
         delayedScanTimer.restart();
       }
@@ -460,18 +1150,39 @@ Singleton {
     id: forgetProcess
     property string ssid: ""
     running: false
-    command: ["sh", "-c", `
-            ssid="$1"; deleted=false
-            if nmcli connection delete id "$ssid" 2>/dev/null; then deleted=true; fi
-            if nmcli connection delete id "Auto $ssid" 2>/dev/null; then deleted=true; fi
-            for i in 1 2 3; do
-              if nmcli connection delete id "$ssid $i" 2>/dev/null; then deleted=true; fi
-            done
-            [ "$deleted" = false ] && echo "No profiles found for SSID: $ssid"
-        `, "--", ssid]
+
+    command: {
+      let script = "";
+      script += "ssid=\"$1\"\n";
+      script += "deleted=false\n\n";
+      script += "# Try exact SSID match first\n";
+      script += "if nmcli connection delete id \"$ssid\" 2>/dev/null; then\n";
+      script += "  echo \"Deleted profile: $ssid\"\n";
+      script += "  deleted=true\n";
+      script += "fi\n\n";
+      script += "# Try \"Auto $ssid\" pattern\n";
+      script += "if nmcli connection delete id \"Auto $ssid\" 2>/dev/null; then\n";
+      script += "  echo \"Deleted profile: Auto $ssid\"\n";
+      script += "  deleted=true\n";
+      script += "fi\n\n";
+      script += "# Try \"$ssid 1\", \"$ssid 2\", etc. patterns\n";
+      script += "for i in 1 2 3; do\n";
+      script += "  if nmcli connection delete id \"$ssid $i\" 2>/dev/null; then\n";
+      script += "    echo \"Deleted profile: $ssid $i\"\n";
+      script += "    deleted=true\n";
+      script += "  fi\n";
+      script += "done\n\n";
+      script += "if [ \"$deleted\" = \"false\" ]; then\n";
+      script += "  echo \"No profiles found for SSID: $ssid\"\n";
+      script += "fi\n";
+      return ["sh", "-c", script, "--", ssid];
+    }
 
     stdout: StdioCollector {
       onStreamFinished: {
+        console.info("Network", "Forget network: \"" + forgetProcess.ssid + "\"");
+        console.debug("Network", text.trim().replace(/[\r\n]/g, " "));
+
         let nets = root.networks;
         if (nets[forgetProcess.ssid]) {
           nets[forgetProcess.ssid].cached = false;
@@ -481,6 +1192,7 @@ Singleton {
         }
 
         root.forgettingNetwork = "";
+
         delayedScanTimer.interval = 5000;
         delayedScanTimer.restart();
       }
@@ -489,8 +1201,55 @@ Singleton {
     stderr: StdioCollector {
       onStreamFinished: {
         root.forgettingNetwork = "";
+        if (text.trim() && text.indexOf("No profiles found") === -1) {
+          console.warn("Network", "Forget error: " + text);
+        }
         delayedScanTimer.interval = 5000;
         delayedScanTimer.restart();
+      }
+    }
+  }
+
+  Process {
+    id: dnsProcess
+    property string deviceName: ""
+    property string dnsServers: ""
+    running: false
+
+    command: {
+      let script = "";
+      script += "DEVICE=\"$1\"\n";
+      script += "DNS=\"$2\"\n";
+      script += "CON_ID=$(nmcli -g GENERAL.CONNECTION device show \"$DEVICE\" | head -n 1)\n";
+      script += "if [ -n \"$CON_ID\" ]; then\n";
+      script += "  if [ -n \"$DNS\" ]; then\n";
+      script += "    nmcli connection modify \"$CON_ID\" ipv4.dns \"$DNS\" ipv4.ignore-auto-dns yes\n";
+      script += "  else\n";
+      script += "    nmcli connection modify \"$CON_ID\" ipv4.dns \"\" ipv4.ignore-auto-dns no\n";
+      script += "  fi\n";
+      script += "  nmcli connection up \"$CON_ID\"\n";
+      script += "else\n";
+      script += "  echo \"No active connection found for device $DEVICE\" >&2\n";
+      script += "  exit 1\n";
+      script += "fi\n";
+      return ["sh", "-c", script, "--", deviceName, dnsServers];
+    }
+
+    stdout: StdioCollector {
+      onStreamFinished: {
+        console.info("Network", "DNS updated for " + dnsProcess.deviceName);
+        ToastService.showNotice("Network", "DNS Updated", "dns");
+        root.refreshActiveEthernetDetails();
+        root.refreshActiveWifiDetails();
+      }
+    }
+
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text.trim()) {
+          console.warn("Network", "DNS update error: " + text);
+          ToastService.showWarning("Network", "DNS update failed");
+        }
       }
     }
   }
