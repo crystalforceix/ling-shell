@@ -11,7 +11,11 @@
   cliphist,
   ddcutil,
   matugen,
+  wlsunset,
+  wl-clipboard,
+  imagemagick,
   wget,
+  gpu-screen-recorder, # optional
   # fonts
   makeFontsConf,
   material-symbols,
@@ -28,8 +32,6 @@
         /nix
         /LICENSE
         /README.md
-        /.qmlformat.ini
-        /.qmllint.ini
         /flake.nix
         /flake.lock
         /shell.nix
@@ -43,9 +45,13 @@
       cliphist
       ddcutil
       matugen
+      wlsunset
+      wl-clipboard
+      imagemagick
       wget
     ]
     ++ lib.optionals (stdenvNoCC.hostPlatform.system == "x86_64-linux") [
+      gpu-screen-recorder
     ];
 
   fontconfig = makeFontsConf {
